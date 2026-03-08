@@ -111,6 +111,19 @@
         "title": "%command.copyMcpConfig%"
       }
     ],
+    "keybindings": [
+      {
+        "command": "terminalGrid.pasteFocusedCell",
+        "key": "ctrl+v",
+        "mac": "cmd+v",
+        "when": "webviewFocus && (activeWebviewPanelId == 'terminalGrid' || webviewId == 'terminalGrid')"
+      },
+      {
+        "command": "terminalGrid.pasteFocusedCell",
+        "key": "shift+insert",
+        "when": "webviewFocus && (activeWebviewPanelId == 'terminalGrid' || webviewId == 'terminalGrid')"
+      }
+    ],
     "mcpServerDefinitionProviders": [
       {
         "id": "terminalGrid",

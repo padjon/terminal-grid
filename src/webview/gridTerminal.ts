@@ -176,6 +176,37 @@ interface Cell {
 
 const cells: (Cell | null)[] = [];
 const grid = document.getElementById("grid")!;
+let focusedCellId = -1;
+
+function resolveTargetCellId(preferredId?: number): number | null {
+  if (preferredId !== undefined && preferredId >= 0 && preferredId < cells.length && cells[preferredId]) {
+    return preferredId;
+  }
+  if (focusedCellId >= 0 && focusedCellId < cells.length && cells[focusedCellId]) {
+    return focusedCellId;
+  }
+  for (let i = 0; i < cells.length; i++) {
+    if (cells[i]) return i;
+  }
+  return null;
+}
+
+function pasteTextToCell(cellId: number, text: string): void {
+  if (!text) return;
+  vscode.postMessage({ type: "input", id: cellId, data: text });
+  cells[cellId]?.terminal.focus();
+}
+
+function requestPasteToCell(preferredId?: number): void {
+  const targetId = resolveTargetCellId(preferredId);
+  if (targetId === null) return;
+  navigator.clipboard.readText().then((text) => {
+    pasteTextToCell(targetId, text);
+  }).catch(() => {
+    // Fallback to extension host clipboard when webview clipboard access is denied.
+    vscode.postMessage({ type: "clipboardRead", id: targetId });
+  });
+}
 
 for (let i = 0; i < total; i++) {
   if (hiddenCells.has(i)) {
@@ -236,8 +267,14 @@ for (let i = 0; i < total; i++) {
     vscode.postMessage({ type: "input", id: i, data });
   });
 
-  terminal.textarea?.addEventListener("focus", () => cellDiv.classList.add("focused"));
+  terminal.textarea?.addEventListener("focus", () => {
+    focusedCellId = i;
+    cellDiv.classList.add("focused");
+  });
   terminal.textarea?.addEventListener("blur", () => cellDiv.classList.remove("focused"));
+  cellDiv.addEventListener("mousedown", () => {
+    focusedCellId = i;
+  });
 
   const cell: Cell = { terminal, fitAddon, el: cellDiv, zoom: 100, zoomLabel, labelEl: label };
   cells.push(cell);
@@ -255,14 +292,16 @@ for (let i = 0; i < total; i++) {
     applyZoom(cell);
   }, { capture: true, passive: false });
 
-  // Ctrl+0 reset zoom, Ctrl+C copy when selection exists
+  // Ctrl+0 reset zoom, Ctrl+C copy when selection exists, Ctrl/Cmd+V paste
   terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-    if (e.ctrlKey && e.type === "keydown" && e.key === "0") {
+    const key = e.key.toLowerCase();
+    const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+    if (e.ctrlKey && e.type === "keydown" && key === "0") {
       cell.zoom = 100;
       applyZoom(cell);
       return false;
     }
-    if (e.ctrlKey && e.type === "keydown" && e.key === "c") {
+    if (e.ctrlKey && e.type === "keydown" && key === "c") {
       const sel = terminal.getSelection();
       if (sel) {
         navigator.clipboard.writeText(sel).then(() => {
@@ -270,6 +309,13 @@ for (let i = 0; i < total; i++) {
         }).catch(() => {});
         return false;
       }
+    }
+    if (
+      e.type === "keydown" &&
+      ((isCtrlOrCmd && key === "v") || (e.shiftKey && key === "insert"))
+    ) {
+      requestPasteToCell(i);
+      return false;
     }
     // Let VS Code handle F-keys and common shortcuts
     if (e.type === "keydown") {
@@ -350,13 +396,7 @@ ctxMenu.addEventListener("click", (e: Event) => {
       break;
     }
     case "paste": {
-      const tid = ctxTargetId;
-      navigator.clipboard.readText().then((text) => {
-        if (text && tid >= 0) {
-          vscode.postMessage({ type: "input", id: tid, data: text });
-          cells[tid]?.terminal.focus();
-        }
-      }).catch(() => {});
+      requestPasteToCell(ctxTargetId);
     }
       break;
     case "clear":
@@ -518,6 +558,14 @@ window.addEventListener("message", (event) => {
       }
       break;
     }
+    case "pasteFocused":
+      requestPasteToCell(msg.id);
+      break;
+    case "clipboardReadResult":
+      if (typeof msg.id === "number" && typeof msg.text === "string") {
+        pasteTextToCell(msg.id, msg.text);
+      }
+      break;
     case "cellConfig": {
       const cell = cells[msg.id];
       if (!cell) break;
