@@ -95,6 +95,27 @@ const TOOLS = [
       required: ["text"],
     },
   },
+  {
+    name: "rename_own_cell",
+    description:
+      "Rename the caller's own Terminal Grid cell. The caller MUST pass cellId explicitly. The recommended source is the TERMINAL_GRID_CELL_ID environment variable from the terminal where the model is running.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        label: {
+          type: "string",
+          description:
+            "New label for your current cell. Use an empty string to reset to the default numeric label.",
+        },
+        cellId: {
+          type: "number",
+          description:
+            "Required cell index (0-based). Read TERMINAL_GRID_CELL_ID and forward it as this field.",
+        },
+      },
+      required: ["label", "cellId"],
+    },
+  },
 ];
 
 // Health check — exit if the HTTP bridge is unreachable
@@ -219,6 +240,43 @@ async function handleToolCall(name, args) {
           content: [{ type: "text", text: JSON.stringify(result) }],
         };
       }
+      case "rename_own_cell": {
+        if (!Number.isInteger(args.cellId) || args.cellId < 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Error: cellId is required and must be a non-negative integer. Read TERMINAL_GRID_CELL_ID and pass it as cellId.",
+              },
+            ],
+            isError: true,
+          };
+        }
+        if (typeof args.label !== "string") {
+          return {
+            content: [{ type: "text", text: "Error: label must be a string" }],
+            isError: true,
+          };
+        }
+        const result = await httpRequest("POST", "/api/rename", {
+          cellId: args.cellId,
+          label: args.label,
+        });
+        if (!result.success) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: ${result.error || "Failed to rename cell"}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: "text", text: JSON.stringify(result) }],
+        };
+      }
       default:
         return {
           content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -258,7 +316,7 @@ rl.on("line", async (line) => {
           name: "terminal-grid-mcp",
           version: "1.0.0",
         },
-        instructions: "You have access to Terminal Grid — a VS Code tmux-like terminal multiplexer. Use get_grid_info first to see the grid layout, then send_to_cell/broadcast to run commands (always use submit:true to execute). Use read_cell to check output. These tools work with both shell and LLM TUI apps (claude, codex) automatically.",
+        instructions: "You have access to Terminal Grid — a VS Code tmux-like terminal multiplexer. Use get_grid_info first to see the grid layout, then send_to_cell/broadcast to run commands (always use submit:true to execute). Use read_cell to check output. For rename_own_cell, first read TERMINAL_GRID_CELL_ID from your environment and forward it as the required cellId argument. These tools work with both shell and LLM TUI apps (claude, codex) automatically.",
       },
     });
   } else if (msg.method === "notifications/initialized") {

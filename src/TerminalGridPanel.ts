@@ -91,6 +91,13 @@ interface ShellDescriptor {
   args: string[];
 }
 
+interface RenameCellResult {
+  success: boolean;
+  error?: string;
+  cellId?: number;
+  label?: string;
+}
+
 const FONT_FORMATS: Record<string, string> = {
   ".ttf": "truetype",
   ".otf": "opentype",
@@ -405,6 +412,26 @@ export class TerminalGridPanel {
     this._panel.webview.postMessage({ type: "setLabels", labels });
   }
 
+  public async renameCell(cellId: number, label: string): Promise<RenameCellResult> {
+    if (!Number.isInteger(cellId)) {
+      return { success: false, error: "Invalid cellId: must be an integer" };
+    }
+    const total = this._rows * this._cols;
+    if (cellId < 0 || cellId >= total) {
+      return { success: false, error: `Invalid cellId: expected 0..${total - 1}` };
+    }
+    if (typeof label !== "string") {
+      return { success: false, error: "Invalid label: must be a string" };
+    }
+
+    const labels = this._context.globalState.get<string[]>("cellLabels", []);
+    labels[cellId] = label;
+    await this._context.globalState.update("cellLabels", labels);
+    this.sendLabels();
+    await vscode.commands.executeCommand("terminalGrid._refreshSidebar");
+    return { success: true, cellId, label };
+  }
+
   /** Send custom font data to an open terminal panel */
   public loadCustomFonts(fonts: CustomFont[]): void {
     for (const font of fonts) {
@@ -570,10 +597,7 @@ export class TerminalGridPanel {
             placeHolder: vscode.l10n.t("Enter alias (empty to reset)"),
           });
           if (newName !== undefined) {
-            labels[msg.id] = newName;
-            await this._context.globalState.update("cellLabels", labels);
-            this.sendLabels();
-            vscode.commands.executeCommand("terminalGrid._refreshSidebar");
+            await this.renameCell(msg.id, newName);
           }
           break;
         }
@@ -733,14 +757,22 @@ export class TerminalGridPanel {
   private _spawnPty(
     nodePty: typeof import("node-pty") | null,
     cols: number, rows: number, cwd: string,
+    cellId: number,
     shellType?: string
   ): PtyLike {
     const resolved = this._resolveShell(shellType);
+    const env = {
+      ...(process.env as Record<string, string>),
+      TERMINAL_GRID_CELL_ID: String(cellId),
+      TERMINAL_GRID_ROWS: String(this._rows),
+      TERMINAL_GRID_COLS: String(this._cols),
+      TERMINAL_GRID_CELL_COUNT: String(this._rows * this._cols),
+    };
     if (nodePty) {
       const proc = nodePty.spawn(resolved.path, resolved.args, {
         name: "xterm-256color",
         cols, rows, cwd,
-        env: process.env as Record<string, string>,
+        env,
       });
       return {
         onData: (cb) => { proc.onData(cb); },
@@ -751,7 +783,7 @@ export class TerminalGridPanel {
     }
     // Fallback: child_process.spawn
     const { spawn } = require("child_process") as typeof import("child_process");
-    const proc = spawn(resolved.path, resolved.args, { cwd, env: process.env, windowsHide: true });
+    const proc = spawn(resolved.path, resolved.args, { cwd, env, windowsHide: true });
     return {
       onData: (cb) => {
         proc.stdout?.on("data", (d: Buffer) => cb(d.toString()));
@@ -814,7 +846,7 @@ export class TerminalGridPanel {
         continue;
       }
       const cellShell = cellOverrides[i]?.shellType || globalShell || "";
-      const pty = this._spawnPty(nodePty, c, r, cwd, cellShell || undefined);
+      const pty = this._spawnPty(nodePty, c, r, cwd, i, cellShell || undefined);
       const id = i;
       const steps = resolveStartupSteps(cellOverrides, expandedCmds, defaultSteps, defaultCommand, i);
       this._cellShellType[id] = cellShell;
@@ -864,7 +896,7 @@ export class TerminalGridPanel {
     const globalShell = vscode.workspace.getConfiguration("terminalGrid").get<string>("shellType", "");
     const cellOverrides = this._context.globalState.get<Record<number, { shellType?: string; startupCommand?: string; startupSteps?: StartupStep[] }>>("cellOverrides", {});
     const cellShell = cellOverrides[id]?.shellType || globalShell || "";
-    const pty = this._spawnPty(TerminalGridPanel._getNodePty(), 80, 24, cwd, cellShell || undefined);
+    const pty = this._spawnPty(TerminalGridPanel._getNodePty(), 80, 24, cwd, id, cellShell || undefined);
 
     // Re-apply startup steps for this cell (backward compat: old startupCommands list)
     const rawCmds = this._context.globalState.get<unknown[]>("startupCommands", []);

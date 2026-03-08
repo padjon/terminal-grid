@@ -45,6 +45,7 @@ No configuration needed — the MCP server auto-registers when the extension act
 | `send_to_cell` | Send text/commands to a specific cell |
 | `read_cell` | Read terminal output from a cell |
 | `broadcast` | Send text to all cells at once |
+| `rename_own_cell` | Rename the caller cell (or pass `cellId` fallback) |
 
 ### LLM CLI Support
 
