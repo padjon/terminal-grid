@@ -528,14 +528,103 @@ interface Cell {
 
 const cells: (Cell | null)[] = [];
 const grid = document.getElementById("grid")!;
-let focusedCellId = -1;
+let lastInteractedCellId = -1;
+let lastFocusedCellId: number | null = null;
+let shouldRestoreFocusOnReturn = false;
+let restoreFocusInterval: ReturnType<typeof setInterval> | undefined;
+let restoreFocusTimeout: ReturnType<typeof setTimeout> | undefined;
+let lastTerminalBlurAt = 0;
+const TAB_OUT_BLUR_GRACE_MS = 500;
+
+function stopRestoreFocusLoop(): void {
+  if (restoreFocusInterval) {
+    clearInterval(restoreFocusInterval);
+    restoreFocusInterval = undefined;
+  }
+  if (restoreFocusTimeout) {
+    clearTimeout(restoreFocusTimeout);
+    restoreFocusTimeout = undefined;
+  }
+}
+
+function getFocusedCellId(): number | null {
+  const active = document.activeElement as HTMLElement | null;
+  if (!active) return null;
+  for (let i = 0; i < cells.length; i++) {
+    const cell = cells[i];
+    if (!cell) continue;
+    if (cell.terminal.textarea === active) return i;
+  }
+  return null;
+}
+
+function armRestoreFocusForWindowReturn(): void {
+  const id = getFocusedCellId();
+  if (id !== null) {
+    lastFocusedCellId = id;
+    lastInteractedCellId = id;
+    shouldRestoreFocusOnReturn = true;
+    return;
+  }
+  if (
+    lastFocusedCellId !== null &&
+    Date.now() - lastTerminalBlurAt <= TAB_OUT_BLUR_GRACE_MS
+  ) {
+    shouldRestoreFocusOnReturn = true;
+  }
+}
+
+function focusLastFocusedCellIfNeeded(): void {
+  if (!shouldRestoreFocusOnReturn || lastFocusedCellId === null) return;
+  if (!document.hasFocus()) return;
+  if (getFocusedCellId() !== null) {
+    shouldRestoreFocusOnReturn = false;
+    stopRestoreFocusLoop();
+    return;
+  }
+  const targetCell = cells[lastFocusedCellId];
+  if (!targetCell) {
+    shouldRestoreFocusOnReturn = false;
+    stopRestoreFocusLoop();
+    return;
+  }
+  targetCell.terminal.focus();
+  targetCell.terminal.textarea?.focus();
+  lastInteractedCellId = lastFocusedCellId;
+}
+
+function startRestoreFocusLoop(): void {
+  if (!shouldRestoreFocusOnReturn || lastFocusedCellId === null) return;
+  stopRestoreFocusLoop();
+  focusLastFocusedCellIfNeeded();
+  restoreFocusInterval = setInterval(focusLastFocusedCellIfNeeded, 100);
+  restoreFocusTimeout = setTimeout(() => {
+    shouldRestoreFocusOnReturn = false;
+    stopRestoreFocusLoop();
+  }, 3000);
+}
+
+window.addEventListener("blur", armRestoreFocusForWindowReturn);
+window.addEventListener("focus", startRestoreFocusLoop);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    armRestoreFocusForWindowReturn();
+    return;
+  }
+  if (document.visibilityState === "visible") {
+    startRestoreFocusLoop();
+  }
+});
 
 function resolveTargetCellId(preferredId?: number): number | null {
   if (preferredId !== undefined && preferredId >= 0 && preferredId < cells.length && cells[preferredId]) {
     return preferredId;
   }
-  if (focusedCellId >= 0 && focusedCellId < cells.length && cells[focusedCellId]) {
-    return focusedCellId;
+  if (lastInteractedCellId >= 0 && lastInteractedCellId < cells.length && cells[lastInteractedCellId]) {
+    return lastInteractedCellId;
+  }
+  if (lastFocusedCellId !== null && lastFocusedCellId >= 0 && lastFocusedCellId < cells.length && cells[lastFocusedCellId]) {
+    return lastFocusedCellId;
   }
   for (let i = 0; i < cells.length; i++) {
     if (cells[i]) return i;
@@ -547,6 +636,8 @@ function pasteTextToCell(cellId: number, text: string): void {
   if (!text) return;
   vscode.postMessage({ type: "input", id: cellId, data: text });
   cells[cellId]?.terminal.focus();
+  lastInteractedCellId = cellId;
+  lastFocusedCellId = cellId;
 }
 
 function requestPasteToCell(preferredId?: number): void {
@@ -671,12 +762,20 @@ for (let i = 0; i < total; i++) {
   });
 
   terminal.textarea?.addEventListener("focus", () => {
-    focusedCellId = i;
+    lastInteractedCellId = i;
+    lastFocusedCellId = i;
+    lastTerminalBlurAt = 0;
+    shouldRestoreFocusOnReturn = false;
+    stopRestoreFocusLoop();
     cellDiv.classList.add("focused");
   });
-  terminal.textarea?.addEventListener("blur", () => cellDiv.classList.remove("focused"));
+  terminal.textarea?.addEventListener("blur", () => {
+    lastTerminalBlurAt = Date.now();
+    cellDiv.classList.remove("focused");
+  });
   cellDiv.addEventListener("mousedown", () => {
-    focusedCellId = i;
+    lastInteractedCellId = i;
+    lastFocusedCellId = i;
   });
 
   const cell: Cell = { terminal, fitAddon, el: cellDiv, zoom: 100, zoomLabel, labelEl: label };
