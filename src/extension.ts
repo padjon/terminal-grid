@@ -311,6 +311,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("terminalGrid.open3x3", () =>
       TerminalGridPanel.createOrShow(context, 3, 3)
     ),
+    vscode.commands.registerCommand("terminalGrid.pasteFocusedCell", () => {
+      TerminalGridPanel.currentPanel?.pasteFocusedCell();
+    }),
     // Agent Teams API
     vscode.commands.registerCommand(
       "terminalGrid.sendToCell",

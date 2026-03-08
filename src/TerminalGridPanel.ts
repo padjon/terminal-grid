@@ -315,6 +315,11 @@ export class TerminalGridPanel {
     return true;
   }
 
+  /** Trigger paste for the focused terminal cell in webview */
+  public pasteFocusedCell(): void {
+    this._panel.webview.postMessage({ type: "pasteFocused" });
+  }
+
   /** Send text + Enter to a specific terminal cell (auto-detects LLM / CSI u mode) */
   public sendInputToCell(cellId: number, text: string): boolean {
     const t = this._terminals[cellId];
@@ -484,6 +489,20 @@ export class TerminalGridPanel {
         case "clipboardWrite":
           vscode.env.clipboard.writeText(msg.text);
           break;
+        case "clipboardRead": {
+          let text = "";
+          try {
+            text = await vscode.env.clipboard.readText();
+          } catch {
+            // Keep empty text on clipboard read failure.
+          }
+          this._panel.webview.postMessage({
+            type: "clipboardReadResult",
+            id: msg.id,
+            text,
+          });
+          break;
+        }
         case "resize":
           try {
             this._terminals[msg.id]?.pty.resize(msg.cols, msg.rows);
