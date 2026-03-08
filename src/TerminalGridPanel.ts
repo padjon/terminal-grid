@@ -504,6 +504,44 @@ export class TerminalGridPanel {
         case "restartTerminal":
           this._restartTerminal(msg.id);
           break;
+        case "openExternalLink": {
+          const rawUrl = typeof msg.url === "string" ? msg.url.trim() : "";
+          if (!rawUrl) break;
+          const linkedFile = this._parseLinkedFileSpec(rawUrl);
+          if (linkedFile) {
+            await this._openLinkedFile(linkedFile.path, linkedFile.line, linkedFile.column);
+            break;
+          }
+          try {
+            const uri = vscode.Uri.parse(rawUrl);
+            if (uri.scheme === "file") {
+              await this._openLinkedFile(uri.fsPath);
+              break;
+            }
+            if (["http", "https", "mailto"].includes(uri.scheme)) {
+              await vscode.env.openExternal(uri);
+              break;
+            }
+            if (!uri.scheme) {
+              await this._openLinkedFile(rawUrl);
+              break;
+            }
+            if ((uri.scheme === "vscode" || uri.scheme === "vscode-insiders") && uri.authority === "file") {
+              await this._openLinkedFile(uri.path);
+              break;
+            }
+            await vscode.env.openExternal(uri);
+          } catch {
+            vscode.window.showWarningMessage(vscode.l10n.t("Invalid link: {0}", rawUrl));
+          }
+          break;
+        }
+        case "openFileLink": {
+          const rawPath = typeof msg.path === "string" ? msg.path.trim() : "";
+          if (!rawPath) break;
+          await this._openLinkedFile(rawPath, msg.line, msg.column);
+          break;
+        }
         case "renameCell": {
           const labels = this._context.globalState.get<string[]>("cellLabels", []);
           const current = labels[msg.id] || "";
@@ -547,6 +585,121 @@ export class TerminalGridPanel {
       "images",
       "sidebar.svg"
     );
+  }
+
+  private _workspaceBasePath(): string {
+    return (
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ||
+      process.env.USERPROFILE ||
+      process.env.HOME ||
+      "."
+    );
+  }
+
+  private _looksLikeFilePath(raw: string): boolean {
+    if (raw.startsWith("~/") || raw.startsWith("~\\")) return true;
+    if (raw.startsWith("./") || raw.startsWith("../") || raw.startsWith(".\\") || raw.startsWith("..\\")) return true;
+    if (raw.startsWith("/") || raw.startsWith("\\\\")) return true;
+    if (/^[A-Za-z]:[\\/]/.test(raw)) return true;
+    if ((raw.includes("/") || raw.includes("\\")) && /\.[A-Za-z0-9._-]+$/.test(raw)) return true;
+    return false;
+  }
+
+  private _parseLinkedFileSpec(raw: string): { path: string; line?: number; column?: number } | null {
+    let candidate = raw.trim();
+    if (!candidate) return null;
+
+    const markdownTarget = candidate.match(/^[^\]]*\]\(([^)\s]+)\)$/);
+    if (markdownTarget) {
+      candidate = markdownTarget[1];
+    }
+
+    try {
+      candidate = decodeURIComponent(candidate);
+    } catch {
+      // Keep original if decode fails.
+    }
+
+    try {
+      const uri = vscode.Uri.parse(candidate, true);
+      if (uri.scheme === "file") {
+        candidate = uri.fsPath;
+      } else if ((uri.scheme === "vscode" || uri.scheme === "vscode-insiders") && uri.authority === "file") {
+        candidate = uri.path;
+      } else if (uri.scheme === "vscode-file") {
+        candidate = uri.path;
+      } else if (uri.scheme) {
+        return null;
+      }
+    } catch {
+      // Not a URI; keep as path candidate.
+    }
+
+    let line: number | undefined;
+    let column: number | undefined;
+
+    const hashTail = candidate.match(/^(.*)#L(\d+)(?:C(\d+))?$/i);
+    if (hashTail) {
+      candidate = hashTail[1];
+      line = Number.parseInt(hashTail[2], 10);
+      if (hashTail[3]) {
+        column = Number.parseInt(hashTail[3], 10);
+      }
+    }
+
+    const numericTail = candidate.match(/^(.*):(\d+)(?::(\d+))?$/);
+    if (numericTail) {
+      const pathPart = numericTail[1];
+      if (pathPart.length > 1) {
+        candidate = pathPart;
+        line = Number.parseInt(numericTail[2], 10);
+        if (numericTail[3]) {
+          column = Number.parseInt(numericTail[3], 10);
+        }
+      }
+    }
+
+    if (!this._looksLikeFilePath(candidate)) return null;
+    return { path: candidate, line, column };
+  }
+
+  private _resolveLinkedPath(rawPath: string): string {
+    let target = rawPath;
+    if (target.startsWith("~/") || target.startsWith("~\\")) {
+      const home = process.env.HOME || process.env.USERPROFILE;
+      if (home) {
+        target = path.join(home, target.slice(2));
+      }
+    }
+    const isWindowsAbs = /^[A-Za-z]:[\\/]/.test(target);
+    if (!path.isAbsolute(target) && !isWindowsAbs) {
+      target = path.resolve(this._workspaceBasePath(), target);
+    }
+    return path.normalize(target);
+  }
+
+  private async _openLinkedFile(rawPath: string, lineValue?: unknown, columnValue?: unknown): Promise<void> {
+    const resolvedPath = this._resolveLinkedPath(rawPath);
+    try {
+      const stat = fs.statSync(resolvedPath);
+      const uri = vscode.Uri.file(resolvedPath);
+      if (stat.isDirectory()) {
+        await vscode.commands.executeCommand("revealInExplorer", uri);
+        return;
+      }
+
+      const doc = await vscode.workspace.openTextDocument(uri);
+      const editor = await vscode.window.showTextDocument(doc, { preview: false });
+      const lineNum = Number(lineValue);
+      const colNum = Number(columnValue);
+      const targetLine = Number.isFinite(lineNum) && lineNum > 0 ? Math.floor(lineNum) - 1 : 0;
+      const targetCol = Number.isFinite(colNum) && colNum > 0 ? Math.floor(colNum) - 1 : 0;
+      const pos = new vscode.Position(targetLine, targetCol);
+      editor.selection = new vscode.Selection(pos, pos);
+      editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    } catch {
+      vscode.window.showWarningMessage(vscode.l10n.t("File not found: {0}", resolvedPath));
+    }
   }
 
   private _readFontBase64(fontPath: string): string | null {

@@ -164,6 +164,358 @@ function applyBgOverride(): void {
   }
 }
 
+interface ParsedTerminalLink {
+  startX: number;
+  endX: number;
+  startY: number;
+  endY: number;
+  text: string;
+  url?: string;
+  filePath?: string;
+  line?: number;
+  column?: number;
+}
+
+interface ParsedTextLink {
+  startIndex: number;
+  endIndex: number;
+  text: string;
+  url?: string;
+  filePath?: string;
+  line?: number;
+  column?: number;
+}
+
+function trimTokenForLink(token: string): { text: string; startOffset: number } {
+  let startOffset = 0;
+  let endOffset = token.length;
+  while (startOffset < token.length && /[([{"'`<]/.test(token[startOffset])) {
+    startOffset++;
+  }
+  while (endOffset > startOffset && /[)\]}>"'`,.;!?]/.test(token[endOffset - 1])) {
+    endOffset--;
+  }
+  return { text: token.slice(startOffset, endOffset), startOffset };
+}
+
+function isWebLink(token: string): boolean {
+  return /^(https?:\/\/|mailto:|file:\/\/)/i.test(token);
+}
+
+function looksLikeFilePath(token: string): boolean {
+  if (!token) return false;
+  if (token.startsWith("~/") || token.startsWith("~\\")) return true;
+  if (token.startsWith("./") || token.startsWith("../") || token.startsWith(".\\") || token.startsWith("..\\")) return true;
+  if (token.startsWith("/") || token.startsWith("\\\\")) return true;
+  if (/^[A-Za-z]:[\\/]/.test(token)) return true;
+  if ((token.includes("/") || token.includes("\\")) && /\.[A-Za-z0-9._-]+$/.test(token)) return true;
+  return false;
+}
+
+function parseFileToken(token: string): { filePath: string; line?: number; column?: number } | null {
+  let normalized = token;
+  const markdownTarget = normalized.match(/^[^\]]*\]\(([^)\s]+)\)$/);
+  if (markdownTarget) {
+    normalized = markdownTarget[1];
+  } else if (normalized.includes("](")) {
+    // Avoid treating partial markdown fragments as file paths.
+    return null;
+  }
+  if (normalized.includes("://")) return null;
+
+  let candidate = normalized;
+  let line: number | undefined;
+  let column: number | undefined;
+
+  const hashTail = candidate.match(/^(.*)#L(\d+)(?:C(\d+))?$/i);
+  if (hashTail) {
+    candidate = hashTail[1];
+    line = Number.parseInt(hashTail[2], 10);
+    if (hashTail[3]) {
+      column = Number.parseInt(hashTail[3], 10);
+    }
+  }
+
+  const numericTail = candidate.match(/^(.*):(\d+)(?::(\d+))?$/);
+  if (numericTail) {
+    const pathPart = numericTail[1];
+    if (pathPart.length > 1) {
+      candidate = pathPart;
+      line = Number.parseInt(numericTail[2], 10);
+      if (numericTail[3]) {
+        column = Number.parseInt(numericTail[3], 10);
+      }
+    }
+  }
+
+  if (!looksLikeFilePath(candidate)) return null;
+  return { filePath: candidate, line, column };
+}
+
+function parseMarkdownToken(raw: string): { startOffset: number; endOffset: number; text: string; target: string } | null {
+  const wrapped = raw.match(/^([({"'`<]*)(\[[^\]]+\]\(([^)\s]+)\))([)\]}>"'`,.;!?]*)$/);
+  if (!wrapped) return null;
+  const leading = wrapped[1].length;
+  const markdown = wrapped[2];
+  const match = markdown.match(/^\[[^\]]+\]\(([^)\s]+)\)$/);
+  if (!match) return null;
+  return {
+    startOffset: leading,
+    endOffset: leading + markdown.length,
+    text: markdown,
+    target: match[1],
+  };
+}
+
+function parseTextLinks(text: string): ParsedTextLink[] {
+  const links: ParsedTextLink[] = [];
+  const maskedChars = Array.from(text);
+
+  const markdownRegex = /\[[^\]\n]+\]\(([^)\s]+)\)/g;
+  let markdownMatch: RegExpExecArray | null = null;
+  while ((markdownMatch = markdownRegex.exec(text)) !== null) {
+    const markdown = markdownMatch[0];
+    const target = markdownMatch[1];
+    const startIndex = markdownMatch.index;
+    const endIndex = startIndex + markdown.length - 1;
+    if (isWebLink(target)) {
+      links.push({ startIndex, endIndex, text: markdown, url: target });
+    } else {
+      const markdownFile = parseFileToken(target);
+      if (markdownFile) {
+        links.push({
+          startIndex,
+          endIndex,
+          text: markdown,
+          filePath: markdownFile.filePath,
+          line: markdownFile.line,
+          column: markdownFile.column,
+        });
+      }
+    }
+    for (let i = startIndex; i <= endIndex; i++) {
+      maskedChars[i] = " ";
+    }
+  }
+
+  const maskedText = maskedChars.join("");
+  const tokenRegex = /\S+/g;
+  let match: RegExpExecArray | null = null;
+
+  while ((match = tokenRegex.exec(maskedText)) !== null) {
+    const raw = match[0];
+
+    const markdown = parseMarkdownToken(raw);
+    if (markdown) {
+      const startIndex = match.index + markdown.startOffset;
+      const endIndex = match.index + markdown.endOffset - 1;
+      if (isWebLink(markdown.target)) {
+        links.push({ startIndex, endIndex, text: markdown.text, url: markdown.target });
+        continue;
+      }
+      const markdownFile = parseFileToken(markdown.target);
+      if (markdownFile) {
+        links.push({
+          startIndex,
+          endIndex,
+          text: markdown.text,
+          filePath: markdownFile.filePath,
+          line: markdownFile.line,
+          column: markdownFile.column,
+        });
+        continue;
+      }
+    }
+
+    const { text: token, startOffset } = trimTokenForLink(raw);
+    if (!token) continue;
+
+    const startIndex = match.index + startOffset;
+    const endIndex = startIndex + token.length - 1;
+
+    if (isWebLink(token)) {
+      links.push({ startIndex, endIndex, text: token, url: token });
+      continue;
+    }
+
+    const file = parseFileToken(token);
+    if (file) {
+      links.push({
+        startIndex,
+        endIndex,
+        text: token,
+        filePath: file.filePath,
+        line: file.line,
+        column: file.column,
+      });
+    }
+  }
+
+  return links;
+}
+
+function getWrappedLineRange(terminal: Terminal, bufferLineNumber: number): { start: number; end: number } {
+  const buffer = terminal.buffer.active;
+  let start = bufferLineNumber - 1;
+  let end = bufferLineNumber - 1;
+
+  while (start > 0 && buffer.getLine(start)?.isWrapped) {
+    start--;
+  }
+  while (buffer.getLine(end + 1)?.isWrapped) {
+    end++;
+  }
+
+  return { start, end };
+}
+
+interface WrappedSegment {
+  offset: number;
+  length: number;
+  y: number;
+  startX: number;
+}
+
+function isPathLikeChunk(text: string): boolean {
+  if (!text) return false;
+  if (/\s/.test(text)) return false;
+  return /^[A-Za-z0-9@._+\-:/\\]+$/.test(text);
+}
+
+function isPathContinuationBoundary(prevRaw: string, nextRaw: string): boolean {
+  const prev = prevRaw.trimEnd();
+  const next = nextRaw.trim();
+  if (!prev || !next) return false;
+  if (!isPathLikeChunk(next)) return false;
+  if (!/[\\/]/.test(prev) && !/[\\/]/.test(next)) return false;
+  if (/[\\/+\-._@]$/.test(prev)) return true;
+  if (/[A-Za-z0-9]$/.test(prev) && /[\\/]/.test(prev) && /^[A-Za-z0-9@._+\-]/.test(next)) return true;
+  return false;
+}
+
+function readWrappedText(
+  terminal: Terminal,
+  start: number,
+  end: number
+): { text: string; segments: WrappedSegment[] } {
+  const buffer = terminal.buffer.active;
+  let text = "";
+  const segments: WrappedSegment[] = [];
+  let offset = 0;
+
+  for (let i = start; i <= end; i++) {
+    const line = buffer.getLine(i);
+    if (!line) continue;
+    const rawLineText = line.translateToString(true);
+    let lineText = rawLineText;
+    let startX = 1;
+    if (i > start) {
+      const prevRaw = buffer.getLine(i - 1)?.translateToString(true) ?? "";
+      if (isPathContinuationBoundary(prevRaw, rawLineText)) {
+        const leadingWhitespace = rawLineText.match(/^\s*/)?.[0].length ?? 0;
+        lineText = rawLineText.slice(leadingWhitespace);
+        startX = leadingWhitespace + 1;
+      }
+    }
+    segments.push({
+      offset,
+      length: lineText.length,
+      y: i + 1,
+      startX,
+    });
+    text += lineText;
+    offset += lineText.length;
+  }
+
+  return { text, segments };
+}
+
+function indexToPosition(index: number, segments: WrappedSegment[]): { x: number; y: number } {
+  for (const segment of segments) {
+    const segEnd = segment.offset + segment.length;
+    if (index < segEnd) {
+      return { x: segment.startX + (index - segment.offset), y: segment.y };
+    }
+  }
+  const fallback = segments[segments.length - 1];
+  if (!fallback) return { x: 1, y: 1 };
+  return { x: Math.max(1, fallback.startX + fallback.length - 1), y: fallback.y };
+}
+
+function registerTerminalLinks(terminal: Terminal): void {
+  terminal.registerLinkProvider({
+    provideLinks(bufferLineNumber, callback) {
+      const buffer = terminal.buffer.active;
+      let { start, end } = getWrappedLineRange(terminal, bufferLineNumber);
+      while (start > 0) {
+        const prevRaw = buffer.getLine(start - 1)?.translateToString(true) ?? "";
+        const curRaw = buffer.getLine(start)?.translateToString(true) ?? "";
+        if (!isPathContinuationBoundary(prevRaw, curRaw)) break;
+        start--;
+      }
+      while (buffer.getLine(end + 1)) {
+        const curRaw = buffer.getLine(end)?.translateToString(true) ?? "";
+        const nextRaw = buffer.getLine(end + 1)?.translateToString(true) ?? "";
+        if (!isPathContinuationBoundary(curRaw, nextRaw)) break;
+        end++;
+      }
+      const { text, segments } = readWrappedText(terminal, start, end);
+      if (!text || segments.length === 0) {
+        callback(undefined);
+        return;
+      }
+      const parsed = parseTextLinks(text);
+      const mapped: ParsedTerminalLink[] = parsed.map((item) => {
+        const startPos = indexToPosition(item.startIndex, segments);
+        const endPos = indexToPosition(item.endIndex, segments);
+        return {
+          startX: startPos.x,
+          endX: endPos.x,
+          startY: startPos.y,
+          endY: endPos.y,
+          text: item.text,
+          url: item.url,
+          filePath: item.filePath,
+          line: item.line,
+          column: item.column,
+        };
+      }).filter((item) => item.startY <= bufferLineNumber && item.endY >= bufferLineNumber);
+
+      if (mapped.length === 0) {
+        callback(undefined);
+        return;
+      }
+
+      callback(mapped.map((item) => {
+        const rangeStartX = item.startY === bufferLineNumber ? item.startX : 1;
+        const rangeEndX = item.endY === bufferLineNumber ? item.endX : terminal.cols;
+        return {
+        range: {
+          start: { x: rangeStartX, y: bufferLineNumber },
+          end: { x: rangeEndX, y: bufferLineNumber },
+        },
+        text: item.text,
+        activate: () => {
+          if (item.url) {
+            vscode.postMessage({ type: "openExternalLink", url: item.url });
+            return;
+          }
+          if (item.filePath) {
+            vscode.postMessage({
+              type: "openFileLink",
+              path: item.filePath,
+              line: item.line,
+              column: item.column,
+            });
+          }
+        },
+        decorations: { underline: true, pointerCursor: true },
+      };
+      }));
+    },
+  });
+}
+
 // ── Build cells ──
 interface Cell {
   terminal: Terminal;
@@ -176,6 +528,18 @@ interface Cell {
 
 const cells: (Cell | null)[] = [];
 const grid = document.getElementById("grid")!;
+
+function toOsc8Link(label: string, target: string): string {
+  // OSC 8 hyperlink: ESC ] 8 ;; URI BEL <label> ESC ] 8 ;; BEL
+  return `\u001b]8;;${target}\u0007${label}\u001b]8;;\u0007`;
+}
+
+function transformMarkdownLinksToOsc8(text: string): string {
+  // Convert markdown links before rendering in xterm so short labels keep hidden targets.
+  return text.replace(/(^|[^!\\])\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_m, prefix: string, label: string, target: string) => {
+    return `${prefix}${toOsc8Link(label, target)}`;
+  });
+}
 
 for (let i = 0; i < total; i++) {
   if (hiddenCells.has(i)) {
@@ -226,11 +590,18 @@ for (let i = 0; i < total; i++) {
     cursorBlink: true,
     scrollback: 5000,
     allowTransparency: true,
+    linkHandler: {
+      allowNonHttpProtocols: true,
+      activate: (_event, text) => {
+        vscode.postMessage({ type: "openExternalLink", url: text });
+      },
+    },
   });
 
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.open(termContainer);
+  registerTerminalLinks(terminal);
 
   terminal.onData((data: string) => {
     vscode.postMessage({ type: "input", id: i, data });
@@ -457,7 +828,12 @@ window.addEventListener("message", (event) => {
   const msg = event.data;
   switch (msg.type) {
     case "output":
-      cells[msg.id]?.terminal.write(msg.data);
+      if (typeof msg.data === "string") {
+        const cell = cells[msg.id];
+        if (cell) {
+          cell.terminal.write(transformMarkdownLinksToOsc8(msg.data));
+        }
+      }
       break;
     case "clear":
       cells[msg.id]?.terminal.clear();
