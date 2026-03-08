@@ -57,6 +57,8 @@ export class McpBridge {
         this._readBody(req).then((body) => this._handleRead(body, res));
       } else if (req.method === "POST" && url.pathname === "/api/broadcast") {
         this._readBody(req).then((body) => this._handleBroadcast(body, res));
+      } else if (req.method === "POST" && url.pathname === "/api/rename") {
+        this._readBody(req).then((body) => this._handleRename(body, res));
       } else {
         res.writeHead(404);
         res.end(JSON.stringify({ error: "Not found" }));
@@ -152,6 +154,39 @@ export class McpBridge {
     }
     res.writeHead(200);
     res.end(JSON.stringify({ success: true, cellCount: count }));
+  }
+
+  private _handleRename(
+    body: Record<string, unknown>,
+    res: http.ServerResponse
+  ): void {
+    const panel = TerminalGridPanel.currentPanel;
+    if (!panel) {
+      res.writeHead(200);
+      res.end(JSON.stringify({ success: false, error: "No grid open" }));
+      return;
+    }
+    const cellId = typeof body.cellId === "number" ? body.cellId : -1;
+    if (typeof body.label !== "string") {
+      res.writeHead(200);
+      res.end(
+        JSON.stringify({ success: false, error: "Invalid label: must be a string" })
+      );
+      return;
+    }
+    const label = body.label;
+    void panel
+      .renameCell(cellId, label)
+      .then((result) => {
+        res.writeHead(200);
+        res.end(JSON.stringify(result));
+      })
+      .catch((error: unknown) => {
+        const message =
+          error instanceof Error ? error.message : "Failed to rename cell";
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: false, error: message }));
+      });
   }
 
   private _readBody(
