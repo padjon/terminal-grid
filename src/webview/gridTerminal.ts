@@ -541,6 +541,38 @@ function transformMarkdownLinksToOsc8(text: string): string {
   });
 }
 
+function isBareAltMnemonic(e: KeyboardEvent): boolean {
+  const isAltKey = e.key === "Alt" || e.code === "AltLeft" || e.code === "AltRight";
+  return isAltKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
+}
+
+function isTerminalInputFocused(): boolean {
+  const active = document.activeElement as HTMLElement | null;
+  if (!active) return false;
+  if (active.classList.contains("xterm-helper-textarea")) return true;
+  return !!active.closest(".cell");
+}
+
+function swallowMenuMnemonicEvent(e: KeyboardEvent): void {
+  e.preventDefault();
+  e.stopPropagation();
+  // stopImmediatePropagation is available on Event in browsers.
+  if (typeof (e as { stopImmediatePropagation?: () => void }).stopImmediatePropagation === "function") {
+    (e as { stopImmediatePropagation: () => void }).stopImmediatePropagation();
+  }
+}
+
+// Guard against delayed bare-Alt events after app switching (e.g. Alt+Tab).
+// In webviews, those events can bubble back to VS Code and steal focus.
+window.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (!isTerminalInputFocused()) return;
+  if (isBareAltMnemonic(e)) swallowMenuMnemonicEvent(e);
+}, true);
+
+window.addEventListener("keyup", (e: KeyboardEvent) => {
+  if (!isTerminalInputFocused()) return;
+  if (isBareAltMnemonic(e)) swallowMenuMnemonicEvent(e);
+}, true);
 for (let i = 0; i < total; i++) {
   if (hiddenCells.has(i)) {
     cells.push(null);
@@ -628,6 +660,13 @@ for (let i = 0; i < total; i++) {
 
   // Ctrl+0 reset zoom, Ctrl+C copy when selection exists
   terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+    // Prevent VS Code mnemonic/menu focus steal caused by bare Alt key events.
+    if (isBareAltMnemonic(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }
+
     if (e.ctrlKey && e.type === "keydown" && e.key === "0") {
       cell.zoom = 100;
       applyZoom(cell);
@@ -642,13 +681,12 @@ for (let i = 0; i < total; i++) {
         return false;
       }
     }
-    // Let VS Code handle F-keys and common shortcuts
+    // Keep key handling inside xterm while the terminal is focused.
+    // Forwarding VS Code shortcuts from this webview can steal focus
+    // (for example quick open / command center) and interrupt typing.
     if (e.type === "keydown") {
       // F1~F12
       if (e.key.match(/^F\d{1,2}$/)) return false;
-      // Ctrl+Shift+P, Ctrl+P, Ctrl+Shift+`, Ctrl+B, Ctrl+J, Ctrl+,
-      if (e.ctrlKey && e.shiftKey && (e.key === "P" || e.key === "p" || e.key === "`")) return false;
-      if (e.ctrlKey && !e.shiftKey && (e.key === "p" || e.key === "b" || e.key === "j" || e.key === ",")) return false;
     }
     return true;
   });
