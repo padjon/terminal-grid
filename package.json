@@ -193,10 +193,11 @@
     "compile": "tsc -p ./ && node scripts/build.js",
     "compile:ext": "tsc -p ./",
     "compile:webview": "node scripts/build.js",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "install": "npm run compile && code --install-extension terminal-grid-$(node -p \"require('./package.json').version\").vsix"
   },
   "devDependencies": {
-    "@types/node": "^25.3.2",
+    "@types/node": "^25.3.5",
     "@types/vscode": "^1.80.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",

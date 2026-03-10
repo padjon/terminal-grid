@@ -640,6 +640,14 @@ function pasteTextToCell(cellId: number, text: string): void {
   lastFocusedCellId = cellId;
 }
 
+function sendEscapeToCell(cellId: number): void {
+  vscode.postMessage({ type: "input", id: cellId, data: "\u001b" });
+  cells[cellId]?.terminal.focus();
+  cells[cellId]?.terminal.textarea?.focus();
+  lastInteractedCellId = cellId;
+  lastFocusedCellId = cellId;
+}
+
 function requestPasteToCell(preferredId?: number): void {
   const targetId = resolveTargetCellId(preferredId);
   if (targetId === null) return;
@@ -695,6 +703,24 @@ window.addEventListener("keyup", (e: KeyboardEvent) => {
   if (!isTerminalInputFocused()) return;
   if (isBareAltMnemonic(e)) swallowMenuMnemonicEvent(e);
 }, true);
+
+window.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key !== "Escape" || e.repeat) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (getFocusedCellId() !== null) return;
+
+  const targetId = resolveTargetCellId();
+  if (targetId === null) return;
+
+  e.preventDefault();
+  e.stopPropagation();
+  if (typeof (e as { stopImmediatePropagation?: () => void }).stopImmediatePropagation === "function") {
+    (e as { stopImmediatePropagation: () => void }).stopImmediatePropagation();
+  }
+
+  sendEscapeToCell(targetId);
+}, true);
+
 for (let i = 0; i < total; i++) {
   if (hiddenCells.has(i)) {
     cells.push(null);
@@ -794,7 +820,8 @@ for (let i = 0; i < total; i++) {
     applyZoom(cell);
   }, { capture: true, passive: false });
 
-  // Ctrl+0 reset zoom, Ctrl+C copy when selection exists, Ctrl/Cmd+V paste
+  // Ctrl+0 reset zoom, Ctrl+C copy when selection exists.
+  // Paste shortcuts are handled by VS Code keybindings for this webview.
   terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
     // Prevent VS Code mnemonic/menu focus steal caused by bare Alt key events.
     if (isBareAltMnemonic(e)) {
@@ -803,7 +830,6 @@ for (let i = 0; i < total; i++) {
       return false;
     }
     const key = e.key.toLowerCase();
-    const isCtrlOrCmd = e.ctrlKey || e.metaKey;
     if (e.ctrlKey && e.type === "keydown" && key === "0") {
       cell.zoom = 100;
       applyZoom(cell);
@@ -817,13 +843,6 @@ for (let i = 0; i < total; i++) {
         }).catch(() => {});
         return false;
       }
-    }
-    if (
-      e.type === "keydown" &&
-      ((isCtrlOrCmd && key === "v") || (e.shiftKey && key === "insert"))
-    ) {
-      requestPasteToCell(i);
-      return false;
     }
     // Keep key handling inside xterm while the terminal is focused.
     // Forwarding VS Code shortcuts from this webview can steal focus
