@@ -47,6 +47,15 @@ let globalThemeColors = __GRID_THEME_COLORS;
 const ZOOM_STEP = 10;
 const ZOOM_MIN = 50;
 const ZOOM_MAX = 300;
+const PASTE_DEDUPE_WINDOW_MS = 150;
+
+let lastPasteRequest:
+  | {
+      cellId: number;
+      text: string;
+      timestamp: number;
+    }
+  | undefined;
 
 // ── Read IDE theme via CSS variables ──
 function css(name: string): string {
@@ -634,6 +643,21 @@ function resolveTargetCellId(preferredId?: number): number | null {
 
 function pasteTextToCell(cellId: number, text: string): void {
   if (!text) return;
+
+  const now = Date.now();
+  if (
+    lastPasteRequest &&
+    lastPasteRequest.cellId === cellId &&
+    lastPasteRequest.text === text &&
+    now - lastPasteRequest.timestamp < PASTE_DEDUPE_WINDOW_MS
+  ) {
+    cells[cellId]?.terminal.focus();
+    lastInteractedCellId = cellId;
+    lastFocusedCellId = cellId;
+    return;
+  }
+
+  lastPasteRequest = { cellId, text, timestamp: now };
   vscode.postMessage({ type: "input", id: cellId, data: text });
   cells[cellId]?.terminal.focus();
   lastInteractedCellId = cellId;
@@ -657,6 +681,17 @@ function requestPasteToCell(preferredId?: number): void {
     // Fallback to extension host clipboard when webview clipboard access is denied.
     vscode.postMessage({ type: "clipboardRead", id: targetId });
   });
+}
+
+function handlePasteEvent(cellId: number, e: ClipboardEvent): boolean {
+  const text = e.clipboardData?.getData("text/plain") ?? "";
+  if (!text) return false;
+
+  e.preventDefault();
+  e.stopPropagation();
+  pasteTextToCell(cellId, text);
+  cells[cellId]?.terminal.textarea?.focus();
+  return true;
 }
 
 function toOsc8Link(label: string, target: string): string {
@@ -820,8 +855,7 @@ for (let i = 0; i < total; i++) {
     applyZoom(cell);
   }, { capture: true, passive: false });
 
-  // Ctrl+0 reset zoom, Ctrl+C copy when selection exists.
-  // Paste shortcuts are handled by VS Code keybindings for this webview.
+  // Ctrl+0 reset zoom, Ctrl+C copy when selection exists, Shift+Insert paste.
   terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
     // Prevent VS Code mnemonic/menu focus steal caused by bare Alt key events.
     if (isBareAltMnemonic(e)) {
@@ -844,6 +878,16 @@ for (let i = 0; i < total; i++) {
         return false;
       }
     }
+    // Ctrl/Cmd+V and Shift+Insert: block xterm's raw key handling
+    // (which would send \x16 instead of pasting) but do NOT read the
+    // clipboard ourselves.  Returning false lets the browser fire its
+    // native paste event on the textarea, which xterm processes
+    // internally and delivers through onData with bracketed-paste.
+    const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+    if (e.type === "keydown" && ((isCtrlOrCmd && key === "v") || (e.shiftKey && key === "insert"))) {
+      return false;
+    }
+
     // Keep key handling inside xterm while the terminal is focused.
     // Forwarding VS Code shortcuts from this webview can steal focus
     // (for example quick open / command center) and interrupt typing.
