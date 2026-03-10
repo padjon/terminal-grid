@@ -292,6 +292,67 @@ export class TerminalGridPanel {
     return getLineEnding(this._cellShellType[id] || "");
   }
 
+  private _shellFamily(shellType: string): "powershell" | "cmd" | "fish" | "posix" {
+    const lower = shellType.toLowerCase();
+    if (lower.includes("powershell") || lower.includes("pwsh")) return "powershell";
+    if (lower.includes("cmd")) return "cmd";
+    if (lower.includes("fish")) return "fish";
+    return "posix";
+  }
+
+  private _quotePosix(value: string): string {
+    return `'${value.replace(/'/g, "'\\''")}'`;
+  }
+
+  private _quotePowerShell(value: string): string {
+    return `'${value.replace(/'/g, "''")}'`;
+  }
+
+  private _buildGridEnvSyncCommand(cellId: number, cellName: string, shellType: string): string {
+    const vars: Record<string, string> = {
+      TERMINAL_GRID_CELL_ID: String(cellId),
+      TERMINAL_GRID_CELL_NAME: cellName,
+      TERMINAL_GRID_CELL_LABEL: cellName,
+      TERMINAL_GRID_ROWS: String(this._rows),
+      TERMINAL_GRID_COLS: String(this._cols),
+      TERMINAL_GRID_CELL_COUNT: String(this._rows * this._cols),
+    };
+
+    const family = this._shellFamily(shellType);
+    const entries = Object.entries(vars);
+    if (family === "powershell") {
+      return entries
+        .map(([key, value]) => `$env:${key}=${this._quotePowerShell(value)}`)
+        .join("; ");
+    }
+    if (family === "cmd") {
+      return entries
+        .map(([key, value]) => `set "${key}=${value.replace(/\"/g, '""')}"`)
+        .join(" && ");
+    }
+    if (family === "fish") {
+      return entries
+        .map(([key, value]) => `set -gx ${key} ${this._quotePosix(value)}`)
+        .join("; ");
+    }
+    return entries
+      .map(([key, value]) => `export ${key}=${this._quotePosix(value)}`)
+      .join("; ");
+  }
+
+  private _syncGridEnvToRunningShells(): void {
+    const labels = this._context.globalState.get<string[]>("cellLabels", []);
+    for (let i = 0; i < this._terminals.length; i++) {
+      if (this._hiddenCells.has(i)) continue;
+      const terminal = this._terminals[i];
+      if (!terminal) continue;
+      const cellName = labels[i] || String(i + 1);
+      const shellType = this._cellShellType[i] || "";
+      const cmd = this._buildGridEnvSyncCommand(i, cellName, shellType);
+      terminal.pty.write(cmd + getLineEnding(shellType));
+    }
+  }
+
   /** Broadcast text to all terminals */
   public broadcastInput(text: string): void {
     for (const t of this._terminals) {
@@ -486,6 +547,7 @@ export class TerminalGridPanel {
       switch (msg.type) {
         case "ready":
           this._createTerminals(msg.defaultCols, msg.defaultRows);
+          this._syncGridEnvToRunningShells();
           // Apply per-cell dimensions if available
           if (msg.cellDims && Array.isArray(msg.cellDims)) {
             for (let i = 0; i < msg.cellDims.length && i < this._terminals.length; i++) {
@@ -758,12 +820,15 @@ export class TerminalGridPanel {
     nodePty: typeof import("node-pty") | null,
     cols: number, rows: number, cwd: string,
     cellId: number,
+    cellName: string,
     shellType?: string
   ): PtyLike {
     const resolved = this._resolveShell(shellType);
     const env = {
       ...(process.env as Record<string, string>),
       TERMINAL_GRID_CELL_ID: String(cellId),
+      TERMINAL_GRID_CELL_NAME: cellName,
+      TERMINAL_GRID_CELL_LABEL: cellName,
       TERMINAL_GRID_ROWS: String(this._rows),
       TERMINAL_GRID_COLS: String(this._cols),
       TERMINAL_GRID_CELL_COUNT: String(this._rows * this._cols),
@@ -828,6 +893,7 @@ export class TerminalGridPanel {
 
     const c = defaultCols || 80;
     const r = defaultRows || 24;
+    const labels = this._context.globalState.get<string[]>("cellLabels", []);
 
     const globalShell = vscode.workspace.getConfiguration("terminalGrid").get<string>("shellType", "");
     const cellOverrides = this._context.globalState.get<Record<number, { shellType?: string; startupCommand?: string; startupSteps?: StartupStep[] }>>("cellOverrides", {});
@@ -846,7 +912,8 @@ export class TerminalGridPanel {
         continue;
       }
       const cellShell = cellOverrides[i]?.shellType || globalShell || "";
-      const pty = this._spawnPty(nodePty, c, r, cwd, i, cellShell || undefined);
+      const cellName = labels[i] || String(i + 1);
+      const pty = this._spawnPty(nodePty, c, r, cwd, i, cellName, cellShell || undefined);
       const id = i;
       const steps = resolveStartupSteps(cellOverrides, expandedCmds, defaultSteps, defaultCommand, i);
       this._cellShellType[id] = cellShell;
@@ -895,8 +962,10 @@ export class TerminalGridPanel {
 
     const globalShell = vscode.workspace.getConfiguration("terminalGrid").get<string>("shellType", "");
     const cellOverrides = this._context.globalState.get<Record<number, { shellType?: string; startupCommand?: string; startupSteps?: StartupStep[] }>>("cellOverrides", {});
+    const labels = this._context.globalState.get<string[]>("cellLabels", []);
     const cellShell = cellOverrides[id]?.shellType || globalShell || "";
-    const pty = this._spawnPty(TerminalGridPanel._getNodePty(), 80, 24, cwd, id, cellShell || undefined);
+    const cellName = labels[id] || String(id + 1);
+    const pty = this._spawnPty(TerminalGridPanel._getNodePty(), 80, 24, cwd, id, cellName, cellShell || undefined);
 
     // Re-apply startup steps for this cell (backward compat: old startupCommands list)
     const rawCmds = this._context.globalState.get<unknown[]>("startupCommands", []);
